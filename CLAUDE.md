@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A single Bash script, `linux-install-bootstrap.sh`, that sets up a developer workstation: system packages, uv + Python, Rust, Python CLI tools (ruff, ty, ansible), lazydocker, OpenCode, Claude Code, Hermes Agent, Hermes ↔ Claude Code integration, and a one-way OneDrive pull into `~/work`. It targets Linux (apt/dnf/pacman), macOS (Homebrew) and WSL2, and must stay compatible with bash 3.2 (stock macOS bash). Avoid bash 4+ features such as associative arrays, `mapfile`, and `${var,,}`.
 
-The header comment and usage text still call the script `bootstrap-hermes-claude.sh`, and the state dir is `~/.local/state/bootstrap-hermes-claude`. Keep this in mind if you rename anything.
+The state dir is still named after the old script name: `~/.local/state/bootstrap-hermes-claude`. Keep this in mind if you rename anything.
 
 The directory is not a git repository.
 
@@ -32,7 +32,8 @@ There are no tests. Use `--dry-run` to check a change. Every setting in the "Con
   - `pm_install`: dispatches on `$PM` (`brew`/`apt`/`dnf`/`pacman`) and adds `$SUDO` when the user is not root.
 - **PATH:** `refresh_path` prepends the known user bin directories (`~/.local/bin`, `~/.cargo/bin`, `~/.opencode/bin`, `~/.claude/local`, `~/.hermes/bin`, `~/bin`) so that later steps can find tools installed earlier in the same run. If you add an installer that writes to a new location, add that directory here.
 - **Error handling:** the script runs under `set -Eeuo pipefail` with an `ERR` trap that calls `die`. Commands that are allowed to fail need `|| true` or an `if` guard. Use `log`/`skip`/`warn`/`die`/`info` for all output.
-- **Interactive steps** (`hermes setup`, `rclone config create`) only run when stdin is a TTY (`[[ -t 0 ]]`). Otherwise the script calls `warn` with the manual command to run and continues. This is why the README one-liner uses `bash <(curl …)` rather than `curl … | bash`: piping the script in replaces stdin, so the interactive steps would be skipped.
+- **Interactive steps** (`hermes setup`, `rclone config create`) are gated on `have_tty` and must redirect `</dev/tty`. The documented install is `curl … | bash`, so stdin is the script itself, not the terminal. When no terminal is available, the script calls `warn` with the manual command to run and continues. Non-interactive commands that might read stdin (for example `claude -p`) get `</dev/null`. Keep `main "$@"` as the last line so the whole script has been parsed before anything runs.
+- **Line endings:** shell scripts must use LF; `.gitattributes` enforces this. A file saved with CRLF fails with `$'\r': command not found`.
 - **Step numbering:** `info` messages use "Step N/11". Update every one of them when you add or remove a step, and also update the header comment list and `main()`.
 - **System packages:** `SYSTEM_PACKAGES` holds `binary:package` pairs, which assumes the package name is the same on every package manager. Packages whose names differ per manager are handled in their own `case "$PM"` block, as `install_system_packages` does for the C toolchain.
 - **`verify()`:** checks a hard-coded list of binaries. Add any newly installed tool to that list.

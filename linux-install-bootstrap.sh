@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# bootstrap-hermes-claude.sh
+# linux-install-bootstrap.sh
 #
 # Idempotent workstation bootstrap. Every step checks current state first and
 # is skipped if already done, so the script is safe to re-run.
@@ -18,10 +18,14 @@
 #  11. OneDrive folder pulled to ~/work (rclone, one-way, never deletes locally)
 #
 # Usage:
-#   ./bootstrap-hermes-claude.sh            # normal run
-#   ./bootstrap-hermes-claude.sh --dry-run  # show what would happen, change nothing
-#   FORCE=1 ./bootstrap-hermes-claude.sh    # reinstall curl-installed tools
-#   SKIP_ONEDRIVE=1 ./bootstrap-hermes-claude.sh
+#   curl -fsSL https://raw.githubusercontent.com/CITYLOGIX/public-install-bootstrap/main/linux-install-bootstrap.sh | bash
+#   curl -fsSL <url> | bash -s -- --dry-run   # show what would happen, change nothing
+#   curl -fsSL <url> | FORCE=1 bash           # reinstall curl-installed tools
+#   curl -fsSL <url> | SKIP_ONEDRIVE=1 bash
+#   bash linux-install-bootstrap.sh [--dry-run]   # from a local copy
+#
+# When piped into bash, stdin is the script itself, so interactive steps read
+# from /dev/tty instead (see have_tty).
 #
 # Supported: Linux (apt, dnf, pacman), macOS (Homebrew), WSL2.
 # Requires bash 3.2+ (works with the stock macOS bash).
@@ -77,6 +81,10 @@ run() {
 }
  
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# True when a terminal is available for prompts, even if stdin is a pipe
+# (as with `curl ... | bash`). Interactive commands must then read </dev/tty.
+have_tty() { [[ -t 0 ]] || { [[ -e /dev/tty ]] && (exec </dev/tty) 2>/dev/null; }; }
  
 trap 'die "Error on line $LINENO: $BASH_COMMAND"' ERR
  
@@ -306,9 +314,9 @@ install_hermes() {
   # First-run setup (provider, model, memory dir). Interactive, so only on a TTY.
   if [[ -f "$HERMES_CONFIG" ]]; then
     skip "Hermes already configured ($HERMES_CONFIG exists)"
-  elif [[ -t 0 ]]; then
+  elif have_tty; then
     info "Running 'hermes setup' (interactive: pick Anthropic as provider)"
-    run hermes setup
+    run hermes setup </dev/tty
   else
     warn "No TTY and no $HERMES_CONFIG. Run 'hermes setup' manually afterwards."
   fi
@@ -393,7 +401,7 @@ EOF
 check_claude_auth() {
   (( DRY_RUN )) && return
   local t=""; have timeout && t="timeout 60"
-  if $t claude -p "reply with OK" >/dev/null 2>&1; then
+  if $t claude -p "reply with OK" </dev/null >/dev/null 2>&1; then
     skip "Claude Code is authenticated"
   else
     warn "Claude Code is not authenticated yet. Run 'claude' once and log in, then re-run this script."
@@ -423,10 +431,10 @@ sync_onedrive() {
   # a) Remote configured?
   if rclone listremotes | grep -qx "${ONEDRIVE_REMOTE}:"; then
     skip "rclone remote '$ONEDRIVE_REMOTE' already configured"
-  elif [[ -t 0 ]]; then
+  elif have_tty; then
     info "Configuring rclone remote '$ONEDRIVE_REMOTE'. A browser window opens for Microsoft 365 sign-in."
     info "Headless machine? Run 'rclone authorize onedrive' on a machine with a browser and paste the token."
-    rclone config create "$ONEDRIVE_REMOTE" onedrive
+    rclone config create "$ONEDRIVE_REMOTE" onedrive </dev/tty
   else
     warn "No TTY to sign in to OneDrive. Run 'rclone config create $ONEDRIVE_REMOTE onedrive' then re-run."
     return
