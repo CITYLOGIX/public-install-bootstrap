@@ -10,7 +10,7 @@ A single Bash script, `linux-install-bootstrap.sh`, that sets up a developer wor
 - **Coding:** C build tools, uv, Python, Rust, and ruff/ty/ansible.
 - **Agentic:** OpenCode, Claude Code, Hermes Agent, and the Hermes ↔ Claude Code integration.
 
-The script It targets Linux (apt/dnf/pacman), macOS (Homebrew) and WSL2, and must stay compatible with bash 3.2 (stock macOS bash). Avoid bash 4+ features such as associative arrays, `mapfile`, and `${var,,}`.
+The script targets Linux (apt/dnf/pacman), macOS (Homebrew) and WSL2, and must stay compatible with bash 3.2 (stock macOS bash). Avoid bash 4+ features such as associative arrays, `mapfile`, and `${var,,}`.
 
 The state dir is still named after the old script name: `~/.local/state/bootstrap-hermes-claude`. Keep this in mind if you rename anything.
 
