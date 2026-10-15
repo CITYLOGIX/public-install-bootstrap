@@ -1,6 +1,6 @@
 # public-install-bootstrap
 
-One command sets up a CityLogix developer workstation: command-line tools, Python and Rust toolchains, and AI coding agents (Claude Code, OpenCode, Hermes Agent) already connected to each other. It also copies your OneDrive `work` folder to `~/work`.
+One command sets up a CityLogix developer workstation: command-line tools, Python and Rust toolchains, and AI coding agents (Claude Code, OpenCode, Hermes Agent) already connected to each other.
 
 ## Install
 
@@ -14,9 +14,8 @@ The install will:
 
 - ask for your `sudo` password once, at the start
 - run `hermes setup`, where you choose **Anthropic** as the provider
-- open a Microsoft 365 sign-in so rclone can reach your OneDrive
 
-While it runs, a progress bar shows which of the 11 steps it is on. Long downloads and installs show a spinner with the elapsed time, and their full output is saved to a log file in `/tmp` (the path is printed at the end). If something fails, the last lines of that log are printed.
+While it runs, a progress bar shows which of the 10 steps it is on. Long downloads and installs show a spinner with the elapsed time, and their full output is saved to a log file in `/tmp` (the path is printed at the end). If something fails, the last lines of that log are printed.
 
 You can run the install again at any time. Each step checks whether its work is already done and skips it if so. If a run stops partway through, fix the problem it reports and run the same command again.
 
@@ -25,9 +24,6 @@ You can run the install again at any time. Each step checks whether its work is 
 ```bash
 # Preview: show every action, change nothing
 curl -fsSL https://raw.githubusercontent.com/CITYLOGIX/public-install-bootstrap/main/linux-install-bootstrap.sh | bash -s -- --dry-run
-
-# Skip the OneDrive step
-curl -fsSL https://raw.githubusercontent.com/CITYLOGIX/public-install-bootstrap/main/linux-install-bootstrap.sh | SKIP_ONEDRIVE=1 bash
 
 # Reinstall uv, Rust, Claude Code, Hermes, OpenCode and lazydocker
 curl -fsSL https://raw.githubusercontent.com/CITYLOGIX/public-install-bootstrap/main/linux-install-bootstrap.sh | FORCE=1 bash
@@ -60,20 +56,15 @@ bash bootstrap.sh
 | 8 | Claude Code |
 | 9 | Hermes Agent, then `hermes setup` |
 | 10 | Connects Hermes to Claude Code: installs Hermes's `claude-code` skill, adds `claude mcp serve` as an MCP server in `~/.hermes/config.yaml`, checks that Claude Code is logged in |
-| 11 | Copies OneDrive `work` to `~/work` with `rclone copy` (one-way; never deletes local files) |
 
 At the end, the script prints every tool's version and runs `hermes doctor`.
 
 ## Configuration
 
-Set these variables in front of `bash` in the install command, for example `curl … | ONEDRIVE_SRC="Documents/Projects" bash`.
+Set these variables in front of `bash` in the install command, for example `curl … | NO_SPINNER=1 bash`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ONEDRIVE_SRC` | `work` | Folder in your OneDrive to copy |
-| `ONEDRIVE_DEST` | `~/work` | Local folder to copy it into |
-| `ONEDRIVE_REMOTE` | `onedrive` | Name of the rclone remote |
-| `SKIP_ONEDRIVE` | `0` | Set to `1` to skip step 11 |
 | `FORCE` | `0` | Set to `1` to reinstall the tools installed with curl |
 | `PYTHON_VERSION` | `3.14` | Python version installed by uv |
 | `HERMES_HOME` | `~/.hermes` | Hermes config directory |
@@ -82,14 +73,12 @@ Set these variables in front of `bash` in the install command, for example `curl
 
 ## Troubleshooting
 
-- **No terminal (CI, `ssh host 'curl … | bash'`):** the prompt steps are skipped with a warning. Afterwards, log in with a terminal and run `hermes setup` and `rclone config create onedrive onedrive`, then run the install again.
-- **Server without a browser:** to set up OneDrive, run `rclone authorize onedrive` on a machine that has a browser, and paste the token it prints into the server's prompt.
-- **`Folder 'work' not found in OneDrive`:** the script lists your top-level OneDrive folders. Run the install again with `ONEDRIVE_SRC` set to the right one.
+- **No terminal (CI, `ssh host 'curl … | bash'`):** `hermes setup` is skipped with a warning. Afterwards, log in with a terminal, run `hermes setup`, then run the install again.
 - **Proxmox VM: agent installed but not running:** the agent needs the VM's guest-agent channel. In Proxmox, go to the VM's **Options → QEMU Guest Agent**, enable it, then fully stop and start the VM (a reboot from inside the VM is not enough).
 - **Running as root:** this works, but user-level tools end up in root's home folder. Run it as a normal user with `sudo`.
 
 ## Notes
 
-- The script runs each tool's official installer (curl piped to a shell). It contains no OneDrive links or tokens: you sign in to your own OneDrive on each machine.
+- The script runs each tool's official installer (curl piped to a shell). It contains no credentials.
 - Before it edits `~/.hermes/config.yaml`, the script saves a timestamped backup next to it.
 - It records which steps it has completed in `~/.local/state/bootstrap-hermes-claude/`.

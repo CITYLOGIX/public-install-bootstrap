@@ -16,13 +16,11 @@
 #   8. Claude Code
 #   9. Hermes Agent
 #  10. Hermes <-> Claude Code integration (skill + MCP server + auth check)
-#  11. OneDrive folder pulled to ~/work (rclone, one-way, never deletes locally)
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/CITYLOGIX/public-install-bootstrap/main/linux-install-bootstrap.sh | bash
 #   curl -fsSL <url> | bash -s -- --dry-run   # show what would happen, change nothing
 #   curl -fsSL <url> | FORCE=1 bash           # reinstall curl-installed tools
-#   curl -fsSL <url> | SKIP_ONEDRIVE=1 bash
 #   bash linux-install-bootstrap.sh [--dry-run]   # from a local copy
 #
 # When piped into bash, stdin is the script itself, so interactive steps read
@@ -49,13 +47,6 @@ HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_CONFIG="$HERMES_HOME/config.yaml"
 HERMES_SKILL_NAME="claude-code"
 MCP_SERVER_NAME="claude-code"
- 
-# OneDrive for Business. The folder is resolved by path inside your own
-# OneDrive rather than by sharing link, so the script contains no access token.
-ONEDRIVE_REMOTE="${ONEDRIVE_REMOTE:-onedrive}"   # rclone remote name
-ONEDRIVE_SRC="${ONEDRIVE_SRC:-work}"             # folder path inside OneDrive
-ONEDRIVE_DEST="${ONEDRIVE_DEST:-$HOME/work}"     # local destination
-SKIP_ONEDRIVE="${SKIP_ONEDRIVE:-0}"
  
 STATE_DIR="$HOME/.local/state/bootstrap-hermes-claude"
 FORCE="${FORCE:-0}"
@@ -96,7 +87,7 @@ trap 'die "Error on line $LINENO: $BASH_COMMAND"' ERR
 # step() draws the overall progress bar; spin() animates a long, quiet command
 # and sends its output to $LOG_FILE. The animation is only used when stdout is
 # a terminal (set NO_SPINNER=1 to disable it); otherwise output streams as-is.
-TOTAL_STEPS=11
+TOTAL_STEPS=10
 STEP=0
 LOG_FILE="${TMPDIR:-/tmp}/linux-install-bootstrap.$(date +%Y%m%d-%H%M%S).log"
 SPIN=0
@@ -579,44 +570,6 @@ setup_integration() {
 }
  
 # ---------------------------------------------------------------------------
-# 11. OneDrive -> ~/work
-# ---------------------------------------------------------------------------
-sync_onedrive() {
-  step "OneDrive '$ONEDRIVE_SRC' -> $ONEDRIVE_DEST"
-  if [[ "$SKIP_ONEDRIVE" == "1" ]]; then skip "SKIP_ONEDRIVE=1"; return; fi
-  (( DRY_RUN )) && { printf '[DRY ] rclone copy %s:%s %s\n' "$ONEDRIVE_REMOTE" "$ONEDRIVE_SRC" "$ONEDRIVE_DEST"; return; }
-  have rclone || die "rclone is required for the OneDrive pull."
- 
-  # a) Remote configured?
-  if rclone listremotes | grep -qx "${ONEDRIVE_REMOTE}:"; then
-    skip "rclone remote '$ONEDRIVE_REMOTE' already configured"
-  elif have_tty; then
-    info "Configuring rclone remote '$ONEDRIVE_REMOTE'. A browser window opens for Microsoft 365 sign-in."
-    info "Headless machine? Run 'rclone authorize onedrive' on a machine with a browser and paste the token."
-    rclone config create "$ONEDRIVE_REMOTE" onedrive </dev/tty
-  else
-    warn "No TTY to sign in to OneDrive. Run 'rclone config create $ONEDRIVE_REMOTE onedrive' then re-run."
-    return
-  fi
- 
-  # b) Source folder exists?
-  if ! rclone lsf "${ONEDRIVE_REMOTE}:${ONEDRIVE_SRC}" --max-depth 1 >/dev/null 2>&1; then
-    warn "Folder '$ONEDRIVE_SRC' not found in OneDrive. Top-level folders are:"
-    rclone lsd "${ONEDRIVE_REMOTE}:" >&2 || true
-    warn "Re-run with ONEDRIVE_SRC='<path>' set to the right folder."
-    return
-  fi
- 
-  # c) Pull. `copy` only transfers new/changed files and never deletes local
-  #    files, so re-running is cheap and safe.
-  mkdir -p "$ONEDRIVE_DEST"
-  rclone copy "${ONEDRIVE_REMOTE}:${ONEDRIVE_SRC}" "$ONEDRIVE_DEST" \
-    --transfers 8 --checkers 16 --stats-one-line --stats 10s -v 2>&1 | grep -Ev '^\s*$' || true
-  log "OneDrive folder up to date in $ONEDRIVE_DEST ($(find "$ONEDRIVE_DEST" -type f | wc -l | tr -d ' ') files)"
-  mark_done onedrive
-}
- 
-# ---------------------------------------------------------------------------
 # Verify
 # ---------------------------------------------------------------------------
 verify() {
@@ -653,7 +606,6 @@ main() {
   install_claude_code
   install_hermes
   setup_integration
-  sync_onedrive
   verify
 }
  
