@@ -5,54 +5,63 @@
 # Idempotent workstation bootstrap. Every step checks current state first and
 # is skipped if already done, so the script is safe to re-run.
 #
-#   1. System packages ... git, htop, nvtop, tmux, neovim, ripgrep, rclone (+ C toolchain,
-#                          + qemu-guest-agent on Proxmox/QEMU VMs)
-#   2. uv .................. Astral installer
-#   3. Python 3.14 ......... managed by uv
-#   4. Rust + Cargo ........ rustup (cargo ships with the Rust toolchain)
-#   5. Python CLI tools .... ruff, ty, ansible (isolated via `uv tool`)
-#   6. lazydocker
-#   7. OpenCode
-#   8. Claude Code
-#   9. Hermes Agent
-#  10. Hermes <-> Claude Code integration (skill + MCP server + auth check)
+# Installs are grouped. You are asked about each group before anything runs:
+#
+#   Utils ..... git, htop, nvtop, tmux, neovim, ripgrep, rclone, lazydocker
+#               (+ qemu-guest-agent on Proxmox/QEMU VMs)
+#   Coding .... C compiler/build tools, uv, Python 3.14, Rust + Cargo,
+#               ruff, ty, ansible
+#   Agentic ... OpenCode, Claude Code, Hermes Agent,
+#               Hermes <-> Claude Code integration (skill + MCP server + auth check)
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/CITYLOGIX/public-install-bootstrap/main/linux-install-bootstrap.sh | bash
-#   curl -fsSL <url> | bash -s -- --dry-run   # show what would happen, change nothing
-#   curl -fsSL <url> | FORCE=1 bash           # reinstall curl-installed tools
-#   bash linux-install-bootstrap.sh [--dry-run]   # from a local copy
+#   curl -fsSL <url> | bash -s -- --yes        # install every group, no questions
+#   curl -fsSL <url> | bash -s -- --dry-run    # show what would happen, change nothing
+#   curl -fsSL <url> | INSTALL_CODING=0 bash   # pre-answer a group (1/0, y/n)
+#   curl -fsSL <url> | FORCE=1 bash            # reinstall curl-installed tools
+#   bash linux-install-bootstrap.sh [options]  # from a local copy
 #
-# When piped into bash, stdin is the script itself, so interactive steps read
-# from /dev/tty instead (see have_tty).
+# When piped into bash, stdin is the script itself, so prompts and interactive
+# steps read from /dev/tty instead (see have_tty).
 #
 # Supported: Linux (apt, dnf, pacman), macOS (Homebrew), WSL2.
 # Requires bash 3.2+ (works with the stock macOS bash).
- 
+
 set -Eeuo pipefail
- 
+
 # ---------------------------------------------------------------------------
 # Config (override any of these via environment variables)
 # ---------------------------------------------------------------------------
 PYTHON_VERSION="${PYTHON_VERSION:-3.14}"
- 
+
 CLAUDE_INSTALL_URL="${CLAUDE_INSTALL_URL:-https://claude.ai/install.sh}"
 HERMES_INSTALL_URL="${HERMES_INSTALL_URL:-https://hermes-agent.nousresearch.com/install.sh}"
 UV_INSTALL_URL="${UV_INSTALL_URL:-https://astral.sh/uv/install.sh}"
 RUSTUP_INSTALL_URL="${RUSTUP_INSTALL_URL:-https://sh.rustup.rs}"
 OPENCODE_INSTALL_URL="${OPENCODE_INSTALL_URL:-https://opencode.ai/install}"
 LAZYDOCKER_INSTALL_URL="${LAZYDOCKER_INSTALL_URL:-https://raw.githubusercontent.com/jesseduffield/lazydocker/master/scripts/install_update_linux.sh}"
- 
+
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_CONFIG="$HERMES_HOME/config.yaml"
 HERMES_SKILL_NAME="claude-code"
 MCP_SERVER_NAME="claude-code"
- 
+
 STATE_DIR="$HOME/.local/state/bootstrap-hermes-claude"
 FORCE="${FORCE:-0}"
 DRY_RUN=0
-[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
- 
+ASSUME_YES=0
+
+# Group selection: 1 = install, 0 = skip, empty = ask. Set from INSTALL_* env vars.
+WANT_UTILS=""
+WANT_CODING=""
+WANT_AGENTIC=""
+
+# Number of step() calls in each group; keep in sync with main().
+UTILS_STEPS=2
+CODING_STEPS=5
+AGENTIC_STEPS=4
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -62,23 +71,23 @@ if [[ -t 1 ]]; then
 else
   C_OK=""; C_SKIP=""; C_WARN=""; C_ERR=""; C_OFF=""; C_BOLD=""; C_DIM=""
 fi
- 
+
 log()  { printf '%s[ OK ]%s %s\n'  "$C_OK"   "$C_OFF" "$*"; }
 skip() { printf '%s[SKIP]%s %s\n'  "$C_SKIP" "$C_OFF" "$*"; }
 warn() { printf '%s[WARN]%s %s\n'  "$C_WARN" "$C_OFF" "$*" >&2; }
 die()  { printf '%s[FAIL]%s %s\n'  "$C_ERR"  "$C_OFF" "$*" >&2; exit 1; }
 info() { printf '\n[....] %s\n' "$*"; }
- 
+
 run() {
   if (( DRY_RUN )); then printf '[DRY ] %s\n' "$*"; else "$@"; fi
 }
- 
+
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # True when a terminal is available for prompts, even if stdin is a pipe
 # (as with `curl ... | bash`). Interactive commands must then read </dev/tty.
 have_tty() { [[ -t 0 ]] || { [[ -e /dev/tty ]] && (exec </dev/tty) 2>/dev/null; }; }
- 
+
 trap 'die "Error on line $LINENO: $BASH_COMMAND"' ERR
 
 # ---------------------------------------------------------------------------
@@ -87,7 +96,7 @@ trap 'die "Error on line $LINENO: $BASH_COMMAND"' ERR
 # step() draws the overall progress bar; spin() animates a long, quiet command
 # and sends its output to $LOG_FILE. The animation is only used when stdout is
 # a terminal (set NO_SPINNER=1 to disable it); otherwise output streams as-is.
-TOTAL_STEPS=10
+TOTAL_STEPS=0   # computed from the selected groups
 STEP=0
 LOG_FILE="${TMPDIR:-/tmp}/linux-install-bootstrap.$(date +%Y%m%d-%H%M%S).log"
 SPIN=0
@@ -97,10 +106,15 @@ SUDO_KEEPALIVE_PID=""
 
 case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
   *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*)
-    BAR_FULL="█"; BAR_EMPTY="░"; SPIN_FRAMES=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏); MARK_OK="✔"; MARK_ERR="✘" ;;
+    BAR_FULL="█"; BAR_EMPTY="░"; SPIN_FRAMES=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏); MARK_OK="✔"; MARK_ERR="✘"; RULE="━━" ;;
   *)
-    BAR_FULL="#"; BAR_EMPTY="-"; SPIN_FRAMES=('|' '/' '-' '\'); MARK_OK="+"; MARK_ERR="x" ;;
+    BAR_FULL="#"; BAR_EMPTY="-"; SPIN_FRAMES=('|' '/' '-' '\'); MARK_OK="+"; MARK_ERR="x"; RULE="==" ;;
 esac
+
+# group <name> <description>: banner printed before a group's steps.
+group() {
+  printf '\n\n%s%s %s %s%s  %s%s%s\n' "$C_BOLD" "$RULE" "$1" "$RULE" "$C_OFF" "$C_DIM" "$2" "$C_OFF"
+}
 
 # step <title>: numbered automatically, in the order main() calls the steps.
 step() {
@@ -182,7 +196,7 @@ sudo_keepalive() {
     while kill -0 $$ 2>/dev/null; do sudo -n true 2>/dev/null; sleep 50; done ) >/dev/null 2>&1 &
   SUDO_KEEPALIVE_PID=$!
 }
- 
+
 # Make freshly installed binaries visible in this shell without a re-login.
 refresh_path() {
   local d
@@ -193,9 +207,9 @@ refresh_path() {
   export PATH
   hash -r
 }
- 
+
 mark_done() { (( DRY_RUN )) || { mkdir -p "$STATE_DIR"; date -u +%FT%TZ > "$STATE_DIR/$1"; }; }
- 
+
 # curl_install <name> <binary> <url> [args passed to the installer shell...]
 # Skips if <binary> is on PATH (unless FORCE=1), otherwise runs `curl | sh`.
 curl_install() {
@@ -221,7 +235,7 @@ curl_install() {
   log "$name installed"
   mark_done "$bin"
 }
- 
+
 # uv_tool <binary> <uv tool install args...>
 uv_tool() {
   local bin="$1"; shift
@@ -233,7 +247,7 @@ uv_tool() {
   refresh_path
   (( DRY_RUN )) || { have "$bin" || die "'$bin' not on PATH after uv tool install."; log "$bin installed"; }
 }
- 
+
 # ---------------------------------------------------------------------------
 # Package manager detection
 # ---------------------------------------------------------------------------
@@ -253,7 +267,7 @@ detect_pm() {
     SUDO=sudo
   fi
 }
- 
+
 pm_install() {
   (( $# )) || return 0
   case "$PM" in
@@ -265,10 +279,41 @@ pm_install() {
     pacman) spin_or_die "pacman -S $*" $SUDO pacman -S --needed --noconfirm "$@" ;;
   esac
 }
- 
+
+# On macOS /usr/bin/git is a stub until Xcode CLT is installed, so require
+# that git actually runs, not just that it is on PATH.
+have_git() { git --version >/dev/null 2>&1; }
+
 # ---------------------------------------------------------------------------
-# Preflight
+# Arguments, preflight, group selection
 # ---------------------------------------------------------------------------
+usage() {
+  cat <<'EOF'
+Usage: linux-install-bootstrap.sh [--yes] [--dry-run]
+
+  -y, --yes      Install every group without asking
+  -n, --dry-run  Show what would happen, change nothing
+  -h, --help     Show this help
+
+Environment:
+  INSTALL_UTILS, INSTALL_CODING, INSTALL_AGENTIC   1/0 (or y/n) to pre-answer a group
+  FORCE=1        Reinstall the tools installed with curl
+  NO_SPINNER=1   Show installer output live instead of the spinner
+EOF
+}
+
+parse_args() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -n|--dry-run) DRY_RUN=1 ;;
+      -y|--yes)     ASSUME_YES=1 ;;
+      -h|--help)    usage; exit 0 ;;
+      *)            usage >&2; die "Unknown option: $arg" ;;
+    esac
+  done
+}
+
 preflight() {
   info "Preflight checks"
   [[ $EUID -eq 0 ]] && warn "Running as root. User tools will be installed for root only. Prefer a normal user with sudo."
@@ -276,22 +321,82 @@ preflight() {
     Linux|Darwin) ;;
     *) die "Unsupported OS: $(uname -s). Use Linux, macOS or WSL2." ;;
   esac
-  # git is installed in step 1, so only curl is a hard prerequisite.
   local missing=() bin
   for bin in curl bash; do have "$bin" || missing+=("$bin"); done
   (( ${#missing[@]} )) && die "Missing prerequisites: ${missing[*]}"
   detect_pm
   refresh_path
   log "Preflight passed (package manager: $PM)"
-  sudo_keepalive
 }
- 
+
+# to_bool <value>: prints 1, 0, or nothing when the value is empty/unrecognised.
+to_bool() {
+  case "$1" in
+    1|[Yy]|[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]) echo 1 ;;
+    0|[Nn]|[Nn][Oo]|[Ff][Aa][Ll][Ss][Ee]) echo 0 ;;
+  esac
+}
+
+# ask_group <var> <env var> <title> <description>: sets <var> to 1 or 0.
+# Precedence: env var, then --yes, then the prompt. With no terminal, defaults to yes.
+ask_group() {
+  local var="$1" env="$2" title="$3" desc="$4" preset ans
+  preset="$(to_bool "${!env:-}")"
+  printf '\n  %s%s%s  %s%s%s\n' "$C_BOLD" "$title" "$C_OFF" "$C_DIM" "$desc" "$C_OFF"
+  if [[ -n "$preset" ]]; then
+    printf -v "$var" '%s' "$preset"
+    printf '  Install %s? %s (from %s)\n' "$title" "$( (( preset )) && echo yes || echo no )" "$env"
+  elif (( ASSUME_YES )); then
+    printf -v "$var" '%s' 1
+    printf '  Install %s? yes (--yes)\n' "$title"
+  elif ! have_tty; then
+    printf -v "$var" '%s' 1
+    printf '  Install %s? yes (no terminal to ask; set %s=0 to skip)\n' "$title" "$env"
+  else
+    printf '  Install %s? [Y/n] ' "$title"
+    read -r ans </dev/tty || ans=""
+    if [[ "$(to_bool "$ans")" == "0" ]]; then printf -v "$var" '%s' 0; else printf -v "$var" '%s' 1; fi
+  fi
+}
+
+DESC_UTILS="git, htop, nvtop, tmux, neovim, ripgrep, rclone, lazydocker (+ qemu-guest-agent on Proxmox VMs)"
+DESC_CODING="C compiler, uv, Python $PYTHON_VERSION, Rust + Cargo, ruff, ty, ansible"
+DESC_AGENTIC="OpenCode, Claude Code, Hermes Agent, Hermes <-> Claude Code integration"
+
+choose_groups() {
+  info "Choose what to install"
+  ask_group WANT_UTILS   INSTALL_UTILS   "Utils"   "$DESC_UTILS"
+  ask_group WANT_CODING  INSTALL_CODING  "Coding"  "$DESC_CODING"
+  ask_group WANT_AGENTIC INSTALL_AGENTIC "Agentic" "$DESC_AGENTIC"
+
+  TOTAL_STEPS=$(( WANT_UTILS * UTILS_STEPS + WANT_CODING * CODING_STEPS + WANT_AGENTIC * AGENTIC_STEPS ))
+  if (( TOTAL_STEPS == 0 )); then
+    log "Nothing selected. Exiting without changes."
+    exit 0
+  fi
+
+  local picked=() g
+  (( WANT_UTILS ))   && picked+=(Utils)
+  (( WANT_CODING ))  && picked+=(Coding)
+  (( WANT_AGENTIC )) && picked+=(Agentic)
+  g="${picked[*]}"
+  printf '\n  Installing: %s%s%s (%d steps)\n' "$C_BOLD" "${g// /, }" "$C_OFF" "$TOTAL_STEPS"
+}
+
+# Only ask for sudo when a selected group will actually need it.
+needs_sudo() {
+  (( WANT_UTILS )) && return 0
+  (( WANT_CODING )) && ! have cc && return 0
+  (( WANT_AGENTIC )) && ! have_git && return 0
+  return 1
+}
+
 # ---------------------------------------------------------------------------
-# 1. System packages
+# Utils
 # ---------------------------------------------------------------------------
 # Each entry is "binary:package". Package names are identical on apt, dnf,
 # pacman and brew for these tools.
-SYSTEM_PACKAGES=(
+UTILS_PACKAGES=(
   "git:git"
   "htop:htop"
   "nvtop:nvtop"
@@ -300,7 +405,7 @@ SYSTEM_PACKAGES=(
   "rg:ripgrep"
   "rclone:rclone"
 )
- 
+
 # Proxmox VMs are QEMU/KVM guests. The virtio port only exists when "QEMU Guest
 # Agent" is enabled in the VM options; DMI catches it when it is not.
 QEMU_GA_PORT="/dev/virtio-ports/org.qemu.guest_agent.0"
@@ -338,29 +443,17 @@ ensure_qemu_agent_running() {
   fi
 }
 
-install_system_packages() {
-  step "System packages"
+install_utils_packages() {
+  step "Command-line tools"
   local entry bin pkg todo=()
-  for entry in "${SYSTEM_PACKAGES[@]}"; do
+  for entry in "${UTILS_PACKAGES[@]}"; do
     bin="${entry%%:*}"; pkg="${entry#*:}"
-    # On macOS /usr/bin/git is a stub until Xcode CLT is installed, so for git
-    # require that it actually runs, not just that it is on PATH.
-    if have "$bin" && { [[ "$bin" != "git" ]] || git --version >/dev/null 2>&1; }; then
+    if have "$bin" && { [[ "$bin" != "git" ]] || have_git; }; then
       skip "$pkg already installed"
     else
       todo+=("$pkg")
     fi
   done
- 
-  # C linker/toolchain: Rust crates need it to build.
-  if ! have cc; then
-    case "$PM" in
-      apt)    todo+=(build-essential) ;;
-      dnf)    todo+=(gcc make) ;;
-      pacman) todo+=(base-devel) ;;
-      brew)   warn "No C compiler found. Run: xcode-select --install" ;;
-    esac
-  fi
 
   # Proxmox / QEMU VM: the guest agent lets Proxmox show the VM's IPs and shut
   # it down or snapshot it cleanly.
@@ -374,15 +467,14 @@ install_system_packages() {
       todo+=(qemu-guest-agent)
     fi
   fi
- 
+
   if (( ${#todo[@]} )); then
-    info "Installing: ${todo[*]}"
     pm_install "${todo[@]}"
-    (( DRY_RUN )) || log "System packages installed"
+    (( DRY_RUN )) || log "Packages installed"
   fi
 
   (( qemu_vm )) && ensure_qemu_agent_running
- 
+
   if (( ! DRY_RUN )) && [[ "$PM" == "apt" ]] && have nvim; then
     local v; v="$(nvim --version | head -1)"
     # Use `if`, not `&& &&`: as the function's last statement a false test
@@ -392,10 +484,38 @@ install_system_packages() {
     fi
   fi
 }
- 
+
+install_lazydocker() {
+  step "lazydocker"
+  if [[ "$PM" == "brew" ]]; then
+    if have lazydocker; then skip "lazydocker already installed"; else pm_install lazydocker; fi
+  else
+    curl_install lazydocker lazydocker "$LAZYDOCKER_INSTALL_URL"
+  fi
+  have docker || warn "Docker is not installed. lazydocker needs a Docker daemon to be useful."
+}
+
 # ---------------------------------------------------------------------------
-# 2-5. uv, Python, Rust, Python CLI tools
+# Coding
 # ---------------------------------------------------------------------------
+install_build_tools() {
+  step "C compiler and build tools"
+  if have cc; then
+    skip "C compiler already installed ($(command -v cc))"
+    return
+  fi
+  # Rust crates and many Python packages need a C linker/compiler to build.
+  case "$PM" in
+    apt)    pm_install build-essential ;;
+    dnf)    pm_install gcc make ;;
+    pacman) pm_install base-devel ;;
+    brew)   warn "No C compiler found. Run: xcode-select --install"; return ;;
+  esac
+  if (( ! DRY_RUN )); then
+    if have cc; then log "C compiler installed"; else die "cc is still missing after installing build tools."; fi
+  fi
+}
+
 install_uv() {
   step "uv"
   if have uv && [[ "$FORCE" != "1" ]]; then
@@ -408,7 +528,7 @@ install_uv() {
   have uv || die "uv not on PATH after install."
   log "uv installed ($(uv --version))"
 }
- 
+
 install_python() {
   step "Python $PYTHON_VERSION"
   if (( ! DRY_RUN )) && uv python find "$PYTHON_VERSION" >/dev/null 2>&1; then
@@ -418,7 +538,7 @@ install_python() {
   spin_or_die "Installing Python $PYTHON_VERSION" uv python install "$PYTHON_VERSION"
   (( DRY_RUN )) || log "Python $PYTHON_VERSION installed ($(uv python find "$PYTHON_VERSION"))"
 }
- 
+
 install_rust() {
   step "Rust + Cargo"
   curl_install "Rust (rustup)" rustup "$RUSTUP_INSTALL_URL" -y --profile default
@@ -429,7 +549,7 @@ install_rust() {
     log "Toolchain: $(rustc --version) / $(cargo --version)"
   fi
 }
- 
+
 install_python_tools() {
   step "ruff, ty, ansible"
   uv_tool ruff    ruff
@@ -437,38 +557,33 @@ install_python_tools() {
   # ansible-core provides the CLIs; the `ansible` package adds the community collections.
   uv_tool ansible ansible-core --with ansible
 }
- 
+
 # ---------------------------------------------------------------------------
-# 6-7. lazydocker, OpenCode
+# Agentic
 # ---------------------------------------------------------------------------
-install_lazydocker() {
-  step "lazydocker"
-  if [[ "$PM" == "brew" ]]; then
-    if have lazydocker; then skip "lazydocker already installed"; else pm_install lazydocker; fi
-  else
-    curl_install lazydocker lazydocker "$LAZYDOCKER_INSTALL_URL"
-  fi
-  have docker || warn "Docker is not installed. lazydocker needs a Docker daemon to be useful."
+# The agent installers clone repositories, so git is needed even when the
+# Utils group was skipped.
+ensure_git() {
+  have_git && return 0
+  info "git is required by the agent installers"
+  pm_install git
 }
- 
+
 install_opencode() {
   step "OpenCode"
   curl_install OpenCode opencode "$OPENCODE_INSTALL_URL"
 }
- 
-# ---------------------------------------------------------------------------
-# 8-9. Claude Code, Hermes
-# ---------------------------------------------------------------------------
+
 install_claude_code() {
   step "Claude Code"
   curl_install "Claude Code" claude "$CLAUDE_INSTALL_URL"
 }
- 
+
 install_hermes() {
   step "Hermes Agent"
   # Its installer may prompt, so it runs in the foreground without the spinner.
   INSTALLER_INTERACTIVE=1 curl_install "Hermes Agent" hermes "$HERMES_INSTALL_URL"
- 
+
   # First-run setup (provider, model, memory dir). Interactive, so only on a TTY.
   if [[ -f "$HERMES_CONFIG" ]]; then
     skip "Hermes already configured ($HERMES_CONFIG exists)"
@@ -479,10 +594,7 @@ install_hermes() {
     warn "No TTY and no $HERMES_CONFIG. Run 'hermes setup' manually afterwards."
   fi
 }
- 
-# ---------------------------------------------------------------------------
-# 10. Hermes <-> Claude Code
-# ---------------------------------------------------------------------------
+
 ensure_claude_skill() {
   if [[ -d "$HERMES_HOME/skills" ]] && \
      find "$HERMES_HOME/skills" -type d -name "$HERMES_SKILL_NAME" 2>/dev/null | grep -q .; then
@@ -498,7 +610,7 @@ ensure_claude_skill() {
     warn "Could not install the skill automatically. Check with: hermes skills search claude"
   fi
 }
- 
+
 ensure_mcp_server() {
   # Registers Claude Code (`claude mcp serve`) as an MCP server in Hermes.
   if (( DRY_RUN )); then
@@ -509,10 +621,11 @@ ensure_mcp_server() {
   touch "$HERMES_CONFIG"
   local claude_bin
   claude_bin="$(command -v claude)" || die "claude not on PATH; cannot register MCP server."
- 
-  # Preferred: structured YAML edit with PyYAML via uv (no system Python needed).
+
+  # Preferred: structured YAML edit with PyYAML via uv (from the Coding group;
+  # no system Python needed). Falls through to a text append without uv.
   local result
-  if result="$(uv run --quiet --no-project --python "$PYTHON_VERSION" --with pyyaml \
+  if have uv && result="$(uv run --quiet --no-project --python "$PYTHON_VERSION" --with pyyaml \
                  python - "$HERMES_CONFIG" "$MCP_SERVER_NAME" "$claude_bin" <<'PY'
 import sys, yaml, shutil, time
 path, name, claude = sys.argv[1:4]
@@ -536,7 +649,7 @@ PY
     fi
     return
   fi
- 
+
   # Fallback: text append, only when unambiguous.
   if grep -Eq "^[[:space:]]+${MCP_SERVER_NAME}:" "$HERMES_CONFIG"; then
     skip "MCP server '$MCP_SERVER_NAME' already in $HERMES_CONFIG"
@@ -546,7 +659,7 @@ PY
   else
     cp "$HERMES_CONFIG" "$HERMES_CONFIG.bak.$(date +%s)"
     cat >> "$HERMES_CONFIG" <<EOF
- 
+
 mcp_servers:
   ${MCP_SERVER_NAME}:
     command: ${claude_bin}
@@ -555,7 +668,7 @@ EOF
     log "Registered Claude Code MCP server in $HERMES_CONFIG (backup saved)"
   fi
 }
- 
+
 check_claude_auth() {
   (( DRY_RUN )) && return
   local t=""; have timeout && t="timeout 60"
@@ -565,27 +678,29 @@ check_claude_auth() {
     warn "Claude Code is not authenticated yet. Run 'claude' once and log in, then re-run this script."
   fi
 }
- 
+
 setup_integration() {
   step "Hermes <-> Claude Code integration"
   refresh_path
   (( DRY_RUN )) || { have claude && have hermes; } || die "Both claude and hermes must be installed first."
-  have tmux || warn "tmux missing. Hermes needs it to drive Claude Code interactively (print mode still works)."
+  have tmux || warn "tmux missing (it is in the Utils group). Hermes needs it to drive Claude Code interactively; print mode still works."
   ensure_claude_skill
   ensure_mcp_server
   check_claude_auth
   mark_done integration
 }
- 
+
 # ---------------------------------------------------------------------------
 # Verify
 # ---------------------------------------------------------------------------
 verify() {
   (( DRY_RUN )) && { info "Dry run complete. No changes made."; return; }
   info "Verification"
-  local b v
-  for b in git claude hermes opencode uv python"$PYTHON_VERSION" rustc cargo ruff ty ansible \
-           lazydocker htop nvtop tmux nvim rg rclone; do
+  local bins=() b v
+  (( WANT_UTILS ))   && bins+=(git htop nvtop tmux nvim rg rclone lazydocker)
+  (( WANT_CODING ))  && bins+=(cc uv "python$PYTHON_VERSION" rustc cargo ruff ty ansible)
+  (( WANT_AGENTIC )) && bins+=(opencode claude hermes)
+  for b in "${bins[@]}"; do
     if [[ "$b" == python* ]]; then
       v="$(uv python find "$PYTHON_VERSION" 2>/dev/null || echo 'MISSING')"
     elif have "$b"; then
@@ -595,27 +710,46 @@ verify() {
     fi
     printf '  %-12s %s\n' "$b" "$v"
   done
-  have hermes && { hermes doctor || warn "'hermes doctor' reported issues (see above)."; }
+  if (( WANT_AGENTIC )) && have hermes; then
+    hermes doctor || warn "'hermes doctor' reported issues (see above)."
+  fi
   echo
   log "Bootstrap complete. Open a new shell (or 'source ~/.bashrc') to pick up PATH changes."
   (( SPIN )) && [[ -f "$LOG_FILE" ]] && printf '%sInstaller output was saved to %s%s\n' "$C_DIM" "$LOG_FILE" "$C_OFF"
   return 0
 }
- 
+
 main() {
+  parse_args "$@"
   preflight
-  install_system_packages
-  install_uv
-  install_python
-  install_rust
-  install_python_tools
-  install_lazydocker
-  install_opencode
-  install_claude_code
-  install_hermes
-  setup_integration
+  choose_groups
+  if needs_sudo; then sudo_keepalive; fi
+
+  if (( WANT_UTILS )); then
+    group "Utils" "$DESC_UTILS"
+    install_utils_packages
+    install_lazydocker
+  fi
+
+  if (( WANT_CODING )); then
+    group "Coding" "$DESC_CODING"
+    install_build_tools
+    install_uv
+    install_python
+    install_rust
+    install_python_tools
+  fi
+
+  if (( WANT_AGENTIC )); then
+    group "Agentic" "$DESC_AGENTIC"
+    ensure_git
+    install_opencode
+    install_claude_code
+    install_hermes
+    setup_integration
+  fi
+
   verify
 }
- 
+
 main "$@"
- 

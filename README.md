@@ -1,6 +1,12 @@
 # public-install-bootstrap
 
-One command sets up a CityLogix developer workstation: command-line tools, Python and Rust toolchains, and AI coding agents (Claude Code, OpenCode, Hermes Agent) already connected to each other.
+One command sets up a CityLogix developer workstation. You choose which of three groups to install:
+
+| Group | What it installs |
+|---|---|
+| **Utils** | git, htop, nvtop, tmux, neovim, ripgrep, rclone, lazydocker; on a Proxmox/QEMU VM, also `qemu-guest-agent` (installed and started) |
+| **Coding** | C compiler/build tools, [uv](https://docs.astral.sh/uv/), Python 3.14 (installed by uv), Rust + Cargo (installed by rustup), ruff, ty, ansible (each installed with `uv tool` in its own environment) |
+| **Agentic** | OpenCode, Claude Code, Hermes Agent (then `hermes setup`), and the Hermes ↔ Claude Code connection: Hermes's `claude-code` skill, `claude mcp serve` added as an MCP server in `~/.hermes/config.yaml`, and a check that Claude Code is logged in |
 
 ## Install
 
@@ -8,26 +14,45 @@ One command sets up a CityLogix developer workstation: command-line tools, Pytho
 curl -fsSL https://raw.githubusercontent.com/CITYLOGIX/public-install-bootstrap/main/linux-install-bootstrap.sh | bash
 ```
 
-This works on any Linux box (Ubuntu/Debian, Fedora/RHEL, Arch), on WSL2, and on macOS with Homebrew. You only need `curl` and a user account with `sudo`; the script installs everything else.
+This works on any Linux box (Ubuntu/Debian, Fedora/RHEL, Arch), on WSL2, and on macOS with Homebrew. You only need `curl` and a user account with `sudo`.
 
-The install will:
+The script starts by asking about each group:
 
-- ask for your `sudo` password once, at the start
-- run `hermes setup`, where you choose **Anthropic** as the provider
+```text
+  Utils  git, htop, nvtop, tmux, neovim, ripgrep, rclone, lazydocker (+ qemu-guest-agent on Proxmox VMs)
+  Install Utils? [Y/n]
+  Coding  C compiler, uv, Python 3.14, Rust + Cargo, ruff, ty, ansible
+  Install Coding? [Y/n]
+  Agentic  OpenCode, Claude Code, Hermes Agent, Hermes <-> Claude Code integration
+  Install Agentic? [Y/n]
+```
 
-While it runs, a progress bar shows which of the 10 steps it is on. Long downloads and installs show a spinner with the elapsed time, and their full output is saved to a log file in `/tmp` (the path is printed at the end). If something fails, the last lines of that log are printed.
+Press Enter to accept a group or type `n` to skip it. After that, the only interruptions are:
 
-You can run the install again at any time. Each step checks whether its work is already done and skips it if so. If a run stops partway through, fix the problem it reports and run the same command again.
+- your `sudo` password, asked once, and only if a group you chose needs it
+- `hermes setup` (Agentic only), where you choose **Anthropic** as the provider
+
+The groups install in the order Utils → Coding → Agentic. A progress bar shows the current step, and long installs show a spinner with the elapsed time. Their full output is saved to a log file in `/tmp`; the path is printed at the end. If something fails, the last lines of that log are printed.
+
+You can run the install again at any time, for example to add a group you skipped. Each step checks whether its work is already done and skips it if so.
 
 ### Options
 
 ```bash
+# Install every group without asking
+curl -fsSL https://raw.githubusercontent.com/CITYLOGIX/public-install-bootstrap/main/linux-install-bootstrap.sh | bash -s -- --yes
+
+# Pre-answer some or all groups (1/0 or y/n); you are only asked about the rest
+curl -fsSL https://raw.githubusercontent.com/CITYLOGIX/public-install-bootstrap/main/linux-install-bootstrap.sh | INSTALL_UTILS=1 INSTALL_CODING=0 INSTALL_AGENTIC=1 bash
+
 # Preview: show every action, change nothing
 curl -fsSL https://raw.githubusercontent.com/CITYLOGIX/public-install-bootstrap/main/linux-install-bootstrap.sh | bash -s -- --dry-run
 
-# Reinstall uv, Rust, Claude Code, Hermes, OpenCode and lazydocker
+# Reinstall the tools installed with curl (uv, Rust, lazydocker, OpenCode, Claude Code, Hermes)
 curl -fsSL https://raw.githubusercontent.com/CITYLOGIX/public-install-bootstrap/main/linux-install-bootstrap.sh | FORCE=1 bash
 ```
+
+With no terminal to ask in (for example in CI), every group defaults to **yes**. Use the `INSTALL_*` variables to skip groups there.
 
 To read the script before running it:
 
@@ -40,24 +65,9 @@ bash bootstrap.sh
 ## After installing
 
 1. Open a new shell, or run `source ~/.bashrc`, so the new tools are on your `PATH`.
-2. If the script warns that Claude Code is not logged in, run `claude`, sign in, then run the install command again to finish connecting Hermes to Claude Code.
+2. If the script warns that Claude Code is not logged in, run `claude`, sign in, then run the install again to finish connecting Hermes to Claude Code.
 
-## What gets installed
-
-| Step | What |
-|---|---|
-| 1 | git, htop, nvtop, tmux, neovim, ripgrep, rclone, C compiler; on a Proxmox/QEMU VM also `qemu-guest-agent` (installed and started) |
-| 2 | [uv](https://docs.astral.sh/uv/) |
-| 3 | Python 3.14 (installed by uv) |
-| 4 | Rust + Cargo (installed by rustup) |
-| 5 | ruff, ty, ansible (installed with `uv tool`, each in its own environment) |
-| 6 | lazydocker |
-| 7 | OpenCode |
-| 8 | Claude Code |
-| 9 | Hermes Agent, then `hermes setup` |
-| 10 | Connects Hermes to Claude Code: installs Hermes's `claude-code` skill, adds `claude mcp serve` as an MCP server in `~/.hermes/config.yaml`, checks that Claude Code is logged in |
-
-At the end, the script prints every tool's version and runs `hermes doctor`.
+At the end, the script prints the version of every tool in the groups you chose, and runs `hermes doctor` if you chose Agentic.
 
 ## Configuration
 
@@ -65,6 +75,7 @@ Set these variables in front of `bash` in the install command, for example `curl
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `INSTALL_UTILS`, `INSTALL_CODING`, `INSTALL_AGENTIC` | ask | `1`/`y` to install the group, `0`/`n` to skip it, without being asked |
 | `FORCE` | `0` | Set to `1` to reinstall the tools installed with curl |
 | `PYTHON_VERSION` | `3.14` | Python version installed by uv |
 | `HERMES_HOME` | `~/.hermes` | Hermes config directory |
@@ -73,8 +84,10 @@ Set these variables in front of `bash` in the install command, for example `curl
 
 ## Troubleshooting
 
+- **Agentic without Utils:** git is still installed, because the agent installers need it. tmux is not; Hermes warns that it needs tmux to drive Claude Code interactively. Run the install again and choose Utils to add it.
+- **Agentic without Coding:** the Hermes config is edited with a simple text append instead of a YAML-aware edit. If `~/.hermes/config.yaml` already has an `mcp_servers:` section, the script prints the lines to add by hand.
 - **No terminal (CI, `ssh host 'curl … | bash'`):** `hermes setup` is skipped with a warning. Afterwards, log in with a terminal, run `hermes setup`, then run the install again.
-- **Proxmox VM: agent installed but not running:** the agent needs the VM's guest-agent channel. In Proxmox, go to the VM's **Options → QEMU Guest Agent**, enable it, then fully stop and start the VM (a reboot from inside the VM is not enough).
+- **Proxmox VM, agent installed but not running:** the agent needs the VM's guest-agent channel. In Proxmox, go to the VM's **Options → QEMU Guest Agent**, enable it, then fully stop and start the VM (a reboot from inside the VM is not enough).
 - **Running as root:** this works, but user-level tools end up in root's home folder. Run it as a normal user with `sudo`.
 
 ## Notes
