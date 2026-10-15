@@ -57,4 +57,10 @@ There are no tests. Use `--dry-run` to check a change. Dry runs skip the spinner
 
 ## Hermes ↔ Claude Code integration (last Agentic step)
 
-`ensure_mcp_server` registers `claude mcp serve` under `mcp_servers.claude-code` in `~/.hermes/config.yaml`. It edits the YAML through an inline Python heredoc run with `uv run --no-project --with pyyaml`, so it does not need a system Python. It writes a timestamped `.bak` file before making changes. If that edit fails, it falls back to appending text, but only when no `mcp_servers:` block exists yet. `check_claude_auth` uses `claude -p` to check whether Claude Code is logged in, and only warns if it is not.
+`ensure_mcp_server` registers `claude mcp serve` under `mcp_servers.claude-code` in `~/.hermes/config.yaml`. It edits the YAML through an inline Python heredoc run with `uv run --no-project --with pyyaml`, so it does not need a system Python. It writes a timestamped `.bak` file before making changes. If that edit fails, it falls back to appending text, but only when no `mcp_servers:` block exists yet. `ensure_hermes_plugin` installs `$HERMES_PLUGIN` (`claude-subscription-directsdk`, which needs Hermes 0.21.4+). `ensure_default_model` then sets `model.provider: $HERMES_PROVIDER` and `model.default: $HERMES_MODEL` (Opus 5.5 by default) with the same uv/PyYAML approach. It only writes when the values differ and saves a backup first. If uv is missing, it falls back to `hermes config set` (unverified) and then to printing the snippet to add by hand.
+
+The plugin runs Claude through the logged-in Claude Code CLI. That is why `install_claude_code` updates the CLI when it is older than `CLAUDE_MIN_VERSION` (compared with `version_ge`), and why `ANTHROPIC_API_KEY`-style environment variables produce a warning: the plugin rejects them.
+
+`check_claude_auth` uses `claude -p` to check whether Claude Code is logged in, and only warns if it is not.
+
+Note: inline Python is passed through `<<'PY'` heredocs. When patching the script from a shell heredoc, use a different outer delimiter.

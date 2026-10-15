@@ -12,7 +12,8 @@
 #   Coding .... C compiler/build tools, uv, Python 3.14, Rust + Cargo,
 #               ruff, ty, ansible
 #   Agentic ... OpenCode, Claude Code, Hermes Agent,
-#               Hermes <-> Claude Code integration (skill + MCP server + auth check)
+#               Hermes <-> Claude Code integration (skill + MCP server +
+#               claude-subscription-directsdk plugin, default model Opus + auth check)
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/CITYLOGIX/public-install-bootstrap/main/linux-install-bootstrap.sh | bash
@@ -46,6 +47,12 @@ HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_CONFIG="$HERMES_HOME/config.yaml"
 HERMES_SKILL_NAME="claude-code"
 MCP_SERVER_NAME="claude-code"
+# Runs Hermes on the Claude Pro/Max subscription through the Claude Code CLI.
+# https://github.com/NousResearch/hermes-official-plugins (claude-subscription-directsdk)
+HERMES_PLUGIN="${HERMES_PLUGIN:-claude-subscription-directsdk}"
+HERMES_PROVIDER="${HERMES_PROVIDER:-claude-subscription-directsdk-experimental}"
+HERMES_MODEL="${HERMES_MODEL:-claude-opus-5-5[1m]}"
+CLAUDE_MIN_VERSION="2.1.280"   # oldest Claude Code CLI the plugin accepts for Opus
 
 STATE_DIR="$HOME/.local/state/bootstrap-hermes-claude"
 FORCE="${FORCE:-0}"
@@ -284,6 +291,18 @@ pm_install() {
 # that git actually runs, not just that it is on PATH.
 have_git() { git --version >/dev/null 2>&1; }
 
+# version_ge <a> <b>: true when dotted version a >= b (numeric, up to 3 parts).
+version_ge() {
+  local IFS=. i x y
+  local a=($1) b=($2)
+  for i in 0 1 2; do
+    x="${a[i]:-0}"; y="${b[i]:-0}"
+    if (( 10#$x > 10#$y )); then return 0; fi
+    if (( 10#$x < 10#$y )); then return 1; fi
+  done
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Arguments, preflight, group selection
 # ---------------------------------------------------------------------------
@@ -361,7 +380,7 @@ ask_group() {
 
 DESC_UTILS="git, htop, nvtop, tmux, neovim, ripgrep, rclone, lazydocker (+ qemu-guest-agent on Proxmox VMs)"
 DESC_CODING="C compiler, uv, Python $PYTHON_VERSION, Rust + Cargo, ruff, ty, ansible"
-DESC_AGENTIC="OpenCode, Claude Code, Hermes Agent, Hermes <-> Claude Code integration"
+DESC_AGENTIC="OpenCode, Claude Code, Hermes Agent (Claude subscription plugin, default Opus), Hermes <-> Claude Code integration"
 
 choose_groups() {
   info "Choose what to install"
@@ -577,6 +596,19 @@ install_opencode() {
 install_claude_code() {
   step "Claude Code"
   curl_install "Claude Code" claude "$CLAUDE_INSTALL_URL"
+  (( DRY_RUN )) && return 0
+  # The Hermes subscription plugin needs a recent CLI for the Opus model aliases.
+  local v
+  v="$(claude --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+  if [[ -z "$v" ]]; then
+    warn "Could not read the Claude Code version."
+  elif version_ge "$v" "$CLAUDE_MIN_VERSION"; then
+    skip "Claude Code $v is recent enough (>= $CLAUDE_MIN_VERSION)"
+  elif spin "Updating Claude Code $v (Opus via Hermes needs >= $CLAUDE_MIN_VERSION)" claude update; then
+    log "Claude Code updated"
+  else
+    warn "claude update failed. Opus through Hermes needs Claude Code >= $CLAUDE_MIN_VERSION."
+  fi
 }
 
 install_hermes() {
@@ -588,7 +620,7 @@ install_hermes() {
   if [[ -f "$HERMES_CONFIG" ]]; then
     skip "Hermes already configured ($HERMES_CONFIG exists)"
   elif have_tty; then
-    info "Running 'hermes setup' (interactive: pick Anthropic as provider)"
+    info "Running 'hermes setup' (interactive; the default model is switched to Claude Opus via your subscription afterwards)"
     run hermes setup </dev/tty
   else
     warn "No TTY and no $HERMES_CONFIG. Run 'hermes setup' manually afterwards."
@@ -669,13 +701,85 @@ EOF
   fi
 }
 
+hermes_plugin_installed() {
+  hermes plugins list 2>/dev/null | grep -q "$HERMES_PLUGIN" && return 0
+  [[ -d "$HERMES_HOME/plugins" ]] && \
+    find "$HERMES_HOME/plugins" -maxdepth 3 -type d -name "${HERMES_PLUGIN}*" 2>/dev/null | grep -q .
+}
+
+ensure_hermes_plugin() {
+  if (( ! DRY_RUN )) && hermes_plugin_installed; then
+    skip "Hermes plugin '$HERMES_PLUGIN' already installed"
+    return
+  fi
+  if spin "Installing Hermes plugin '$HERMES_PLUGIN'" hermes plugins install "$HERMES_PLUGIN"; then
+    (( DRY_RUN )) || log "Installed Hermes plugin '$HERMES_PLUGIN'"
+  else
+    warn "Could not install '$HERMES_PLUGIN'. It needs Hermes 0.21.4+ (try 'hermes update'), then run: hermes plugins install $HERMES_PLUGIN"
+  fi
+}
+
+# Sets model.provider/model.default in config.yaml so Hermes uses Claude Opus
+# through the subscription plugin by default.
+ensure_default_model() {
+  if (( DRY_RUN )); then
+    printf '[DRY ] set model.provider=%s model.default=%s in %s\n' "$HERMES_PROVIDER" "$HERMES_MODEL" "$HERMES_CONFIG"
+    return
+  fi
+  mkdir -p "$HERMES_HOME"
+  touch "$HERMES_CONFIG"
+  local result
+  if have uv && result="$(uv run --quiet --no-project --python "$PYTHON_VERSION" --with pyyaml \
+                 python - "$HERMES_CONFIG" "$HERMES_PROVIDER" "$HERMES_MODEL" <<'PY'
+import sys, yaml, shutil, time
+path, provider, model = sys.argv[1:4]
+with open(path) as f:
+    cfg = yaml.safe_load(f) or {}
+m = cfg.get("model")
+if not isinstance(m, dict):
+    m = {"default": m} if m else {}
+if m.get("provider") == provider and m.get("default") == model:
+    print("exists"); sys.exit(0)
+prev = "%s / %s" % (m.get("provider") or "-", m.get("default") or "-")
+shutil.copy2(path, f"{path}.bak.{int(time.time())}")
+m["provider"] = provider
+m["default"] = model
+cfg["model"] = m
+with open(path, "w") as f:
+    yaml.safe_dump(cfg, f, sort_keys=False)
+print("was " + prev)
+PY
+  )"; then
+    if [[ "$result" == "exists" ]]; then
+      skip "Hermes default model already $HERMES_MODEL via $HERMES_PROVIDER"
+    else
+      log "Hermes default model set to $HERMES_MODEL via $HERMES_PROVIDER ($result; backup saved)"
+    fi
+  elif hermes config set model.provider "$HERMES_PROVIDER" >/dev/null 2>&1 && \
+       hermes config set model.default "$HERMES_MODEL" >/dev/null 2>&1 && \
+       grep -qF "$HERMES_PROVIDER" "$HERMES_CONFIG"; then
+    log "Hermes default model set to $HERMES_MODEL via $HERMES_PROVIDER"
+  else
+    warn "Could not set the Hermes default model. Run 'hermes model' or add to $HERMES_CONFIG:"
+    printf 'model:\n  provider: %s\n  default: %s\n' "$HERMES_PROVIDER" "$HERMES_MODEL" >&2
+  fi
+
+  # The plugin refuses to start when these are inherited from the environment.
+  local var
+  for var in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX; do
+    if [[ -n "${!var:-}" ]]; then
+      warn "$var is set in your environment. The Claude subscription plugin rejects it; unset it in your shell profile."
+    fi
+  done
+}
+
 check_claude_auth() {
   (( DRY_RUN )) && return
   local t=""; have timeout && t="timeout 60"
   if spin "Checking Claude Code login" sh -c "$t claude -p 'reply with OK' </dev/null >/dev/null 2>&1"; then
     skip "Claude Code is authenticated"
   else
-    warn "Claude Code is not authenticated yet. Run 'claude' once and log in, then re-run this script."
+    warn "Claude Code is not logged in. Hermes uses it for the Opus model. Run 'claude auth login', then re-run this script."
   fi
 }
 
@@ -686,6 +790,8 @@ setup_integration() {
   have tmux || warn "tmux missing (it is in the Utils group). Hermes needs it to drive Claude Code interactively; print mode still works."
   ensure_claude_skill
   ensure_mcp_server
+  ensure_hermes_plugin
+  ensure_default_model
   check_claude_auth
   mark_done integration
 }
