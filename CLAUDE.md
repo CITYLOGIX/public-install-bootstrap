@@ -20,7 +20,7 @@ FORCE=1 ./linux-install-bootstrap.sh            # reinstall curl-installed tools
 SKIP_ONEDRIVE=1 ./linux-install-bootstrap.sh    # skip the rclone/OneDrive step
 ```
 
-There are no tests. Use `--dry-run` to check a change. Every setting in the "Config" block (install URLs, `PYTHON_VERSION`, `HERMES_HOME`, `ONEDRIVE_*`) can be overridden with an environment variable.
+There are no tests. Use `--dry-run` to check a change. Dry runs skip the spinner and every `(( ! DRY_RUN ))` branch, so to test those, source the script without its final `main "$@"` line (`grep -v '^main "\$@"'`), stub functions such as `have`, `is_qemu_vm` and `systemctl`, and call a single step function. Use `script -qec …` to get a pseudo-TTY for the spinner. Every setting in the "Config" block (install URLs, `PYTHON_VERSION`, `HERMES_HOME`, `ONEDRIVE_*`) can be overridden with an environment variable.
 
 ## Design invariants
 
@@ -34,7 +34,11 @@ There are no tests. Use `--dry-run` to check a change. Every setting in the "Con
 - **Error handling:** the script runs under `set -Eeuo pipefail` with an `ERR` trap that calls `die`. Commands that are allowed to fail need `|| true` or an `if` guard. Use `log`/`skip`/`warn`/`die`/`info` for all output.
 - **Interactive steps** (`hermes setup`, `rclone config create`) are gated on `have_tty` and must redirect `</dev/tty`. The documented install is `curl … | bash`, so stdin is the script itself, not the terminal. When no terminal is available, the script calls `warn` with the manual command to run and continues. Non-interactive commands that might read stdin (for example `claude -p`) get `</dev/null`. Keep `main "$@"` as the last line so the whole script has been parsed before anything runs.
 - **Line endings:** shell scripts must use LF; `.gitattributes` enforces this. A file saved with CRLF fails with `$'\r': command not found`.
-- **Step numbering:** `info` messages use "Step N/11". Update every one of them when you add or remove a step, and also update the header comment list and `main()`.
+- **Steps and progress display:** each step function starts with `step "<title>"`, which numbers the steps automatically (in the order `main()` calls them) and draws the progress bar. When you add or remove a step, update `TOTAL_STEPS`, the header comment list and `main()`.
+- **Spinner:** run long, non-interactive commands with `spin_or_die "<label>" cmd…` (fatal on failure, prints the tail of `$LOG_FILE`) or `spin` (returns the exit code, for use in `if`). Both handle dry-run. They run the command in the background with `</dev/null` and output sent to `$LOG_FILE`, so never use them for anything that prompts. `hermes setup`, `rclone config` and the Hermes installer (`INSTALLER_INTERACTIVE=1 curl_install …`) run in the foreground. The spinner is off when stdout is not a TTY, or when `NO_SPINNER=1`.
+- **sudo:** `sudo_keepalive` (called from preflight) asks for the password once on `/dev/tty` and refreshes it in the background, so `$SUDO` commands can run behind the spinner.
+- **Proxmox/QEMU VMs:** `is_qemu_vm` (virtio guest-agent port or DMI vendor) adds `qemu-guest-agent` to step 1, and `ensure_qemu_agent_running` starts it.
+- **`&&` chains under `set -e`:** never end a function with `test && action`. When the test is false, the function returns 1 and the script aborts. Use `if`. This is how the neovim version check broke step 1.
 - **System packages:** `SYSTEM_PACKAGES` holds `binary:package` pairs, which assumes the package name is the same on every package manager. Packages whose names differ per manager are handled in their own `case "$PM"` block, as `install_system_packages` does for the C toolchain.
 - **`verify()`:** checks a hard-coded list of binaries. Add any newly installed tool to that list.
 
