@@ -303,8 +303,9 @@ SYSTEM_PACKAGES=(
  
 # Proxmox VMs are QEMU/KVM guests. The virtio port only exists when "QEMU Guest
 # Agent" is enabled in the VM options; DMI catches it when it is not.
+QEMU_GA_PORT="/dev/virtio-ports/org.qemu.guest_agent.0"
 is_qemu_vm() {
-  [[ -e /dev/virtio-ports/org.qemu.guest_agent.0 ]] && return 0
+  [[ -e "$QEMU_GA_PORT" ]] && return 0
   local f
   for f in /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name /sys/class/dmi/id/bios_vendor; do
     [[ -r "$f" ]] && grep -qiE 'qemu|proxmox' "$f" && return 0
@@ -316,17 +317,24 @@ is_qemu_vm() {
 qemu_agent_installed() { [[ -x /usr/sbin/qemu-ga || -x /usr/bin/qemu-ga ]]; }
 
 ensure_qemu_agent_running() {
-  if (( DRY_RUN )); then printf '[DRY ] %s systemctl enable --now qemu-guest-agent\n' "$SUDO"; return; fi
+  if (( DRY_RUN )); then printf '[DRY ] %s systemctl start qemu-guest-agent\n' "$SUDO"; return; fi
   have systemctl || { warn "No systemd; start qemu-guest-agent manually."; return; }
   if systemctl is-active --quiet qemu-guest-agent; then
     skip "qemu-guest-agent already running"
-  # On Debian/Ubuntu the unit is static (started by udev), so `enable` can fail
-  # while `start` works.
-  elif $SUDO systemctl enable --now qemu-guest-agent >/dev/null 2>&1 || \
-       $SUDO systemctl start qemu-guest-agent >/dev/null 2>&1; then
-    log "qemu-guest-agent running"
+  # The unit is bound to the virtio port. Without it, `systemctl start` blocks
+  # for the device timeout (90s) and then fails, so do not even try.
+  elif [[ ! -e "$QEMU_GA_PORT" ]]; then
+    warn "qemu-guest-agent is installed, but this VM has no guest-agent channel yet."
+    warn "In Proxmox: VM > Options > QEMU Guest Agent > Enabled, then fully stop and start the VM (a reboot from inside is not enough). The agent then starts on its own."
   else
-    warn "qemu-guest-agent is installed but not running. In Proxmox, enable VM > Options > QEMU Guest Agent, then fully stop and start the VM."
+    # Debian/Ubuntu ship a static unit (started by udev), so `enable` may fail; that is fine.
+    $SUDO systemctl enable qemu-guest-agent >/dev/null 2>&1 || true
+    local t=""; have timeout && t="timeout 30"
+    if spin "Starting qemu-guest-agent" $SUDO $t systemctl start qemu-guest-agent; then
+      log "qemu-guest-agent running"
+    else
+      warn "qemu-guest-agent did not start. Check: sudo systemctl status qemu-guest-agent"
+    fi
   fi
 }
 
