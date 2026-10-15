@@ -231,8 +231,11 @@ install_system_packages() {
  
   if (( ! DRY_RUN )) && [[ "$PM" == "apt" ]] && have nvim; then
     local v; v="$(nvim --version | head -1)"
-    [[ "$v" =~ v0\.([0-9]+) ]] && (( BASH_REMATCH[1] < 10 )) && \
+    # Use `if`, not `&& &&`: as the function's last statement a false test
+    # would become its return status and trip `set -e`.
+    if [[ "$v" =~ v0\.([0-9]+) ]] && (( BASH_REMATCH[1] < 10 )); then
       warn "Distro neovim is old ($v). Many plugins need 0.10+. Consider the official AppImage or PPA."
+    fi
   fi
 }
  
